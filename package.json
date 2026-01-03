@@ -1,0 +1,22 @@
+{
+  "name": "filesystem_mcp_middleware",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "Selim Eser",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "child_process": "^1.0.2",
+    "fs": "^0.0.1-security",
+    "minimatch": "^10.1.1",
+    "path": "^0.12.7"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.3",
+    "typescript": "^5.9.3"
+  }
+}

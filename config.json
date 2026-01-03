@@ -1,0 +1,13 @@
+{
+  "deny_read_and_write": [
+    ".env",
+    "id_rsa",
+    "*.pem",
+    "credentials.json"
+  ],
+  "deny_write": [
+    "thesis.tex",
+    "*.lock",
+    "README.md"
+  ]
+}
