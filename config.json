@@ -1,11 +1,11 @@
 {
-  "deny_read_and_write": [
+  "deny_insight": [
     ".env",
     "id_rsa",
     "*.pem",
     "credentials.json"
   ],
-  "deny_write": [
+  "deny_modification": [
     "thesis.tex",
     "*.lock",
     "README.md"

@@ -10,10 +10,21 @@ const minimatch_1 = require("minimatch");
 // --- Konfiguration laden ---
 const CONFIG_PATH = path_1.default.join(__dirname, 'config.json');
 const config = JSON.parse(fs_1.default.readFileSync(CONFIG_PATH, 'utf-8'));
+// --- Tool-Kategorien definieren (gem. Anthropic Spec) ---
+const INSIGHT_TOOLS = [
+    'read_text_file',
+    'read_media_file',
+    'read_multiple_files',
+    'list_directory_with_sizes',
+    'get_file_info'
+];
+const MODIFICATION_TOOLS = [
+    'write_file',
+    'edit_file',
+    'move_file'
+];
 // --- Original Server starten ---
-// Wir starten den offiziellen Filesystem-Server direkt über npx.
-// Das Argument '-y' bestätigt automatisch die Installation, falls nötig.
-const args = process.argv.slice(2); // Die erlaubten Pfade von Claude durchreichen
+const args = process.argv.slice(2);
 const serverProcess = (0, child_process_1.spawn)('npx', [
     '-y',
     '@modelcontextprotocol/server-filesystem',
@@ -27,19 +38,38 @@ function isRequestAllowed(req) {
     if (req.method !== 'tools/call')
         return true;
     const toolName = req.params?.name;
-    const filePath = req.params?.arguments?.path;
-    // Wenn kein Pfad involviert ist, lassen wir es durch
-    if (!filePath || !toolName)
+    if (!toolName)
         return true;
-    const filename = path_1.default.basename(filePath);
-    // 1. Check: Totale Sperre (Read & Write)
-    const isTotallyBlocked = config.deny_read_and_write.some(pattern => (0, minimatch_1.minimatch)(filename, pattern));
-    if (isTotallyBlocked)
-        return false;
-    // 2. Check: Schreibsperre (Write Only)
-    if (toolName === 'write_file') {
-        const isWriteBlocked = config.deny_write.some(pattern => (0, minimatch_1.minimatch)(filename, pattern));
-        if (isWriteBlocked)
+    // Sammle alle betroffenen Dateien (Single path oder Array paths)
+    let filesToCheck = [];
+    if (req.params?.arguments?.path) {
+        filesToCheck.push(req.params.arguments.path);
+    }
+    if (req.params?.arguments?.paths && Array.isArray(req.params.arguments.paths)) {
+        filesToCheck.push(...req.params.arguments.paths);
+    }
+    if (filesToCheck.length === 0)
+        return true;
+    // 1. Check: Insight (Vertraulichkeit)
+    // Gilt fuer Insight-Tools UND Modification-Tools (implizit)
+    const isInsightBlocked = filesToCheck.some(filePath => {
+        const filename = path_1.default.basename(filePath);
+        return config.deny_insight.some(pattern => (0, minimatch_1.minimatch)(filename, pattern));
+    });
+    if (isInsightBlocked) {
+        // Wenn ich es nicht sehen darf, darf ich es auch nicht bearbeiten/lesen
+        if (INSIGHT_TOOLS.includes(toolName) || MODIFICATION_TOOLS.includes(toolName)) {
+            return false;
+        }
+    }
+    // 2. Check: Modification (Integrität)
+    // Gilt nur fuer Modification-Tools
+    if (MODIFICATION_TOOLS.includes(toolName)) {
+        const isModificationBlocked = filesToCheck.some(filePath => {
+            const filename = path_1.default.basename(filePath);
+            return config.deny_modification.some(pattern => (0, minimatch_1.minimatch)(filename, pattern));
+        });
+        if (isModificationBlocked)
             return false;
     }
     return true;
@@ -51,7 +81,7 @@ process.stdin.on('data', (chunk) => {
     buffer += chunk.toString();
     // JSON-RPC über Stdio ist oft "Newline Delimited"
     const lines = buffer.split('\n');
-    buffer = lines.pop() || ''; // Letztes (unvollständiges) Element behalten
+    buffer = lines.pop() || '';
     for (const line of lines) {
         if (!line.trim())
             continue;
@@ -59,34 +89,29 @@ process.stdin.on('data', (chunk) => {
             const message = JSON.parse(line);
             // Sicherheitsprüfung
             if (isRequestAllowed(message)) {
-                // ERLAUBT: Nachricht an den echten Server weiterleiten
                 serverProcess.stdin.write(JSON.stringify(message) + '\n');
             }
             else {
-                // BLOCKIERT: Wir faken eine Antwort an Claude
+                // Blockieren mit Fehler
                 const errorResponse = {
                     jsonrpc: "2.0",
                     id: message.id,
                     error: {
-                        code: -32000, // App-spezifischer Fehlercode
+                        code: -32000,
                         message: "Access denied by MCP Firewall Policy."
                     }
                 };
                 process.stdout.write(JSON.stringify(errorResponse) + '\n');
-                // Optional: Logging für den Admin
-                console.error(`[BLOCKED] ${message.params?.name} on ${message.params?.arguments?.path}`);
+                console.error(`[BLOCKED] Tool: ${message.params?.name}`);
             }
         }
         catch (e) {
-            // Bei Parse-Fehlern leiten wir einfach weiter (Fail-Open oder Fail-Closed)
             console.error("JSON Parse Error", e);
         }
     }
 });
 // --- Server Output Handling ---
-// Antworten vom Server leiten wir einfach zurück an Claude
 serverProcess.stdout.pipe(process.stdout);
-// Prozess-Ende behandeln
 serverProcess.on('exit', (code) => {
     process.exit(code ?? 0);
 });
