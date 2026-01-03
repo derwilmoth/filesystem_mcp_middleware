@@ -12,7 +12,9 @@ interface JsonRpcRequest {
     name?: string;
     arguments?: {
       path?: string;
-      paths?: string[]; // Fuer read_multiple_files
+      paths?: string[];      // Fuer read_multiple_files
+      source?: string;       // Fuer move_file
+      destination?: string;  // Fuer move_file
     };
   };
 }
@@ -26,7 +28,7 @@ interface Config {
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const config: Config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
 
-// --- Tool-Kategorien definieren (gem. Anthropic Spec) ---
+// --- Tool-Kategorien definieren ---
 const INSIGHT_TOOLS = [
   'read_text_file',
   'read_media_file',
@@ -49,45 +51,49 @@ const serverProcess = spawn('npx', [
   '@modelcontextprotocol/server-filesystem',
   ...args
 ], {
-  stdio: ['pipe', 'pipe', process.stderr] // Stderr leiten wir direkt weiter
+  stdio: ['pipe', 'pipe', process.stderr] 
 });
 
 // --- Security Engine ---
 function isRequestAllowed(req: JsonRpcRequest): boolean {
-  // Nur 'tools/call' ist sicherheitsrelevant
   if (req.method !== 'tools/call') return true;
   
   const toolName = req.params?.name;
-  if (!toolName) return true;
+  const args = req.params?.arguments;
+  
+  if (!toolName || !args) return true;
 
-  // Sammle alle betroffenen Dateien (Single path oder Array paths)
+  // Sammle alle betroffenen Dateien aus verschiedenen Parametern
   let filesToCheck: string[] = [];
   
-  if (req.params?.arguments?.path) {
-    filesToCheck.push(req.params.arguments.path);
+  // Standard 'path'
+  if (args.path) filesToCheck.push(args.path);
+  
+  // Array 'paths' (read_multiple_files)
+  if (args.paths && Array.isArray(args.paths)) {
+    filesToCheck.push(...args.paths);
   }
-  if (req.params?.arguments?.paths && Array.isArray(req.params.arguments.paths)) {
-    filesToCheck.push(...req.params.arguments.paths);
-  }
+  
+  // Source & Destination (move_file)
+  if (args.source) filesToCheck.push(args.source);
+  if (args.destination) filesToCheck.push(args.destination);
 
+  // Wenn keine Datei betroffen ist (z.B. list_allowed_directories), erlauben
   if (filesToCheck.length === 0) return true;
 
   // 1. Check: Insight (Vertraulichkeit)
-  // Gilt fuer Insight-Tools UND Modification-Tools (implizit)
   const isInsightBlocked = filesToCheck.some(filePath => {
     const filename = path.basename(filePath);
     return config.deny_insight.some(pattern => minimatch(filename, pattern));
   });
 
   if (isInsightBlocked) {
-    // Wenn ich es nicht sehen darf, darf ich es auch nicht bearbeiten/lesen
     if (INSIGHT_TOOLS.includes(toolName) || MODIFICATION_TOOLS.includes(toolName)) {
       return false;
     }
   }
 
   // 2. Check: Modification (Integrität)
-  // Gilt nur fuer Modification-Tools
   if (MODIFICATION_TOOLS.includes(toolName)) {
     const isModificationBlocked = filesToCheck.some(filePath => {
       const filename = path.basename(filePath);
@@ -101,13 +107,11 @@ function isRequestAllowed(req: JsonRpcRequest): boolean {
 }
 
 // --- Stream Interceptor Logic ---
-// Wir lesen stdin (von Claude), puffern Zeilen und parsen JSON
 let buffer = '';
 
 process.stdin.on('data', (chunk) => {
   buffer += chunk.toString();
   
-  // JSON-RPC über Stdio ist oft "Newline Delimited"
   const lines = buffer.split('\n');
   buffer = lines.pop() || ''; 
 
@@ -117,11 +121,9 @@ process.stdin.on('data', (chunk) => {
     try {
       const message = JSON.parse(line);
       
-      // Sicherheitsprüfung
       if (isRequestAllowed(message)) {
         serverProcess.stdin.write(JSON.stringify(message) + '\n');
       } else {
-        // Blockieren mit Fehler
         const errorResponse = {
           jsonrpc: "2.0",
           id: message.id,
